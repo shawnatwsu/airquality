@@ -1,0 +1,131 @@
+// Enhanced GEE Script: Wildfire Mapping with Burned Area Difference Map and Exportable Visuals
+
+var southCarolina = ee.FeatureCollection('TIGER/2018/States')
+  .filter(ee.Filter.eq('NAME', 'South Carolina'));
+var geometry = southCarolina.geometry();
+Map.centerObject(geometry, 7);
+
+var preFire = ['2025-02-01', '2025-02-28'];
+var duringFire = ['2025-03-01', '2025-03-15'];
+var postFire = ['2025-03-16', '2025-04-05'];
+
+function getSentinel(dateRange) {
+  return ee.ImageCollection('COPERNICUS/S2_SR')
+    .filterDate(dateRange[0], dateRange[1])
+    .filterBounds(geometry)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .median()
+    .clip(geometry);
+}
+
+var sentinelPre = getSentinel(preFire);
+var sentinelDuring = getSentinel(duringFire);
+var sentinelPost = getSentinel(postFire);
+
+var ndviPre = sentinelPre.normalizedDifference(['B8', 'B4']).rename('NDVI');
+var ndviPost = sentinelPost.normalizedDifference(['B8', 'B4']).rename('NDVI');
+
+var nbrPre = sentinelPre.normalizedDifference(['B8', 'B12']).rename('NBR');
+var nbrPost = sentinelPost.normalizedDifference(['B8', 'B12']).rename('NBR');
+var burnSeverity = nbrPre.subtract(nbrPost).rename('BurnSeverity');
+
+// Difference Map - burned vegetation (NDVI difference)
+var ndviDiff = ndviPre.subtract(ndviPost).rename('NDVI_Diff');
+var ndviDiffVis = {min: 0, max: 0.5, palette: ['white', 'orange', 'red']};
+Map.addLayer(ndviDiff, ndviDiffVis, 'Burned Area (NDVI Difference)');
+
+var viirsFires = ee.ImageCollection('FIRMS')
+  .filterDate('2025-03-01', '2025-04-06')
+  .select('T21');
+
+var rgbVis = {bands: ['B4', 'B3', 'B2'], min:0, max:3000};
+var ndviVis = {min:-0.2, max:0.8, palette:['white','yellow','green']};
+var burnSeverityVis = {min: -0.2, max: 1, palette:['green','yellow','red']};
+var fireVis = {min:300, max:350, palette:['yellow','orange','red']};
+
+Map.addLayer(sentinelPre, rgbVis, 'Sentinel-2 Pre-Fire');
+Map.addLayer(sentinelDuring, rgbVis, 'Sentinel-2 During Fire');
+Map.addLayer(sentinelPost, rgbVis, 'Sentinel-2 Post-Fire');
+Map.addLayer(ndviPre, ndviVis, 'NDVI Pre-Fire');
+Map.addLayer(ndviPost, ndviVis, 'NDVI Post-Fire');
+Map.addLayer(burnSeverity, burnSeverityVis, 'Burn Severity (NBR)');
+Map.addLayer(viirsFires.sum().clip(geometry), fireVis, 'VIIRS Active Fires');
+
+// Export Burn Severity Image
+Export.image.toDrive({
+  image: burnSeverity,
+  description: 'BurnSeverity_SC',
+  region: geometry,
+  scale: 30,
+  maxPixels: 1e13
+});
+
+// Export NDVI Difference Image
+Export.image.toDrive({
+  image: ndviDiff,
+  description: 'NDVI_Diff_SC',
+  region: geometry,
+  scale: 30,
+  maxPixels: 1e13
+});
+
+// Export GIF of fire progression
+var gifCollection = viirsFires.map(function(img) {
+  return img.clip(geometry).visualize(fireVis).set({time: img.get('system:time_start')});
+});
+
+Export.video.toDrive({
+  collection: gifCollection,
+  description: 'SC_Fire_Progression_Sentinel2',
+  dimensions: 800,
+  framesPerSecond: 2,
+  region: geometry
+});
+
+var ndviChart = ui.Chart.image.histogram(ndviPost, geometry, 30).setOptions({
+  title: 'Post-Fire NDVI Distribution',
+  hAxis: {title: 'NDVI'},
+  vAxis: {title: 'Frequency'},
+  colors: ['green']
+});
+print(ndviChart);
+
+var burnSeverityChart = ui.Chart.image.histogram(burnSeverity, geometry, 30).setOptions({
+  title: 'Burn Severity Distribution',
+  hAxis: {title: 'Burn Severity (NBR difference)'},
+  vAxis: {title: 'Frequency'},
+  colors: ['red']
+});
+print(burnSeverityChart);
+
+var fireTimeSeries = ui.Chart.image.series({
+  imageCollection: viirsFires,
+  region: geometry,
+  reducer: ee.Reducer.mean(),
+  scale: 375,
+  xProperty: 'system:time_start'
+}).setOptions({
+  title: 'Fire Intensity Over Time (VIIRS T21)',
+  hAxis: {title: 'Date'},
+  vAxis: {title: 'Avg Brightness Temp (K)'},
+  lineWidth: 2,
+  colors: ['orange']
+});
+print(fireTimeSeries);
+
+function addLegend(title, palette, min, max) {
+  var legend = ui.Panel({style: {position: 'bottom-left'}});
+  legend.add(ui.Label({value: title, style: {fontWeight: 'bold'}}));
+
+  var colorbar = ui.Thumbnail({
+    image: ee.Image.pixelLonLat().select(0),
+    params: {bbox:[0,0,1,0.1], dimensions:'200x20', format:'png', min:0, max:1, palette:palette},
+    style: {stretch:'horizontal', margin:'0px 8px', maxHeight:'20px'}
+  });
+
+  legend.add(colorbar);
+  legend.add(ui.Panel([ui.Label(min), ui.Label(max)], ui.Panel.Layout.flow('horizontal')));
+  Map.add(legend);
+}
+
+addLegend('Burn Severity', ['green','yellow','red'], 'Low', 'High');
